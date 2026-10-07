@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 安卓 8.1+：刘海区拉满 + 全屏沉浸（游戏画面不吃状态栏/刘海）。
+         旧版走 res/values/styles.xml 的 NoTitleBar.Fullscreen。 -->
+    <style name="AppTheme" parent="android:Theme.NoTitleBar.Fullscreen">
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:windowContentTransitions">false</item>
+    </style>
+</resources>

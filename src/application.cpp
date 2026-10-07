@@ -1,0 +1,1101 @@
+#include "game/application.h"
+
+#include "game/app/debug/debug.h"
+#include "game/app/game_init.h"
+#include "game/app/game_loop.h"
+#include "game/app/ui_layout.h"
+#include "game/render/blit.h"
+#include "game/app/game_shutdown.h"
+#include "game/app/main_menu.h"
+#include "game/app/load_dialog.h"
+#include "game/app/new_game.h"
+#include "game/app/victory.h"
+#include "game/core/log.h"
+#include "game/core/config.h"
+
+#include <chrono>
+#include <cstring>
+#include <filesystem>
+
+namespace rich4 {
+
+bool Application::init(const std::string& gameDir, bool headless, const DisplayConfig& display) {
+    // [RE 0x401B9C] WinMain 初始化段
+    // 依据: 0x401B9C 反编译; RegisterClassA("Rich4") + CreateWindowExA(0, "Rich4",
+    //       "Rich4", 0x80000000=WS_POPUP, 屏幕宽高) + sub_4015D6() + ShowWindow(5)
+    // 迁移: Win32 窗口类/全屏窗口 → SDL_CreateWindow（窗口化，现代化目标）;
+    //       显示模式由 0x4015D6 的 SetDisplayMode(640,480,16) 决定 → 逻辑分辨率 640x480
+    m_gameDir = gameDir;
+    m_headless = headless;
+    // [NEW] 媒体目录（音乐/视频）：rich4.ini [paths] mediaDir 优先；
+    //   默认 <gameDir>/Media，回退 <gameDir>/../Media
+    if (!config().mediaDir.empty()) {
+        m_mediaDir = config().mediaDir;
+    } else {
+        m_mediaDir = gameDir + "/Media";
+        if (!std::filesystem::exists(m_mediaDir + "/Music")) {
+            m_mediaDir = gameDir + "/../Media";
+        }
+    }
+
+    // [NEW] headless 测试运行（docs/testing.md）：SDL dummy 驱动——无真实窗口/显卡/声卡；
+    //   Surface 为 CPU 位图，绘制路径与 saveBmp 不依赖 GPU，VSync 关闭配合虚拟时钟极速推进；
+    //   音频 open 失败走既有 silent 兜底
+    if (headless) {
+        SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
+        SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
+    }
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) {
+        RICH4_LOGE("SDL_Init failed: %s", SDL_GetError());
+        return false;
+    }
+    // 窗口默认 2x 整数倍缩放（1280x960），避免非整数缩放的像素不均匀（贴图错位感）
+    if (!m_window.create("Rich4", display.windowWidth, display.windowHeight)) {
+        return false;
+    }
+    // [NEW M4-A1] 运行期画布尺寸：默认 native 设计尺寸；SDL 逻辑呈现同步为画布尺寸
+    // [NEW M4-A2] uiScale != 1 时画布 = 设计尺寸 × uiScale（canvas 显式指定优先）；
+    //   autoScale（wide/free preset）画布 = 窗口 drawable，uiScale = 画布高/480
+    float drawScale = display.uiScale > 0.0f ? display.uiScale : 1.0f;
+    int canvasW = display.canvasWidth;
+    int canvasH = display.canvasHeight;
+    m_autoScale = display.autoScale;
+    if (m_autoScale) {
+        // [NEW M4-D 实机] free/wide：画布 = **逻辑尺寸**（设备/缩放比），绘制 scale 恒 1；
+        //   窗口呈现由 SDL logical presentation 放大（nearest）——绘制成本降至 native 同级，
+        //   彻底消除"分辨率越大越慢"（原"设备画布 + 块展开"成本 ∝ 设备像素）。
+        int dw = 0;
+        int dh = 0;
+        SDL_GetWindowSizeInPixels(m_window.handle(), &dw, &dh);
+        if (dw <= 0) {
+            dw = display.windowWidth;
+        }
+        if (dh <= 0) {
+            dh = display.windowHeight;
+        }
+        const float deviceScale = static_cast<float>(dh) / Surface::kHeight;
+        canvasW = static_cast<int>(dw / deviceScale + 0.5f);
+        if (canvasW < 640) {
+            canvasW = 640;
+        }
+        canvasH = Surface::kHeight;
+        drawScale = 1.0f;
+        RICH4_LOGI("autoScale: logical canvas %dx%d (device %dx%d)", canvasW, canvasH, dw, dh);
+    } else {
+        if (canvasW <= 0) {
+            canvasW = static_cast<int>(Surface::kWidth * drawScale + 0.5f);
+        }
+        if (canvasH <= 0) {
+            canvasH = static_cast<int>(Surface::kHeight * drawScale + 0.5f);
+        }
+    }
+    if (!m_renderer.create(m_window.handle(), canvasW, canvasH, !headless && display.vsync)) {
+        return false;
+    }
+    // [NEW M4-F] 全屏（rich4.ini [display] fullscreen；headless 不适用）
+    if (display.fullscreen && !headless) {
+        SDL_SetWindowFullscreen(m_window.handle(), true);
+    }
+    // [RE 0x48A08C] 后台绘制缓冲（RGB555）
+    if (!m_surface.create(m_renderer.handle(), canvasW, canvasH)) {
+        return false;
+    }
+    // [NEW M4-A2] 绘制缩放：逻辑 640x480 坐标 → 设备像素（画布）
+    m_surface.setScale(drawScale);
+    // [NEW M4-D 实机] 呈现放大过滤（逻辑画布 → 窗口；默认线性平滑）
+    m_surface.setLinearFilter(display.linearFilter);
+    // [RE 0x44F935] 文本渲染表面（512x200，原版 dword_4762CC）；
+    //   [NEW M4-F] 字体/字号来自 rich4.ini [text]
+    m_text.init(config().fontRegular.c_str(), config().fontBold.c_str(), config().sizeScale);
+
+    // [RE 0x4015D6] 游戏初始化（失败等价于原版 "DirectDraw Initial Error!" 弹窗后退出）
+    if (!gameInit(*this)) {
+        return false;
+    }
+
+    // TODO(RE 0x451677): START.AVI 开场动画（MCI "play vfw" 迁移待定）
+
+    m_running = true;
+    return true;
+}
+
+void Application::run() {
+    // [RE 0x401B9C] WinMain 主循环：LABEL_5（回菜单：清通关进度 g_clearedMaps + 重置
+    //   word_4991B6/4991B8/byte_46CAFC + mainMenuScene）/ LABEL_6（续局：不清进度，
+    //   newGameInit(byte_46CAFC=1) 保留配置与上轮 AI 灰名单）。游戏结束按 g_sceneRequest 分派。
+    GameState& st = m_state;
+    while (m_running) {
+        int scene;
+        if (m_runFlow == 0) {
+            // LABEL_5 [RE 0x401C8C..0x401CA6]：清通关进度 + 重置模式/地图/进入标志
+            std::memset(st.clearedMaps, 0, sizeof(st.clearedMaps)); // [RE 0x401C9E] g_clearedMaps=0
+            st.gameMode = 0;       // word_4991B6
+            st.mapIndex = 0;       // word_4991B8
+            st.gameInited = false; // byte_46CAFC
+            if (st.debugQuickstart) {
+                scene = 0; // [NEW] headless 测试开局：跳过主菜单（docs/testing.md）
+                RICH4_LOGI("quickstart: bypass main menu (RE 0x4029FD)");
+            } else {
+                scene = mainMenuScene(*this); // [RE 0x4029FD]
+            }
+            if (!m_running) {
+                return; // 原版 Msg.message == 18(WM_QUIT) 时 WinMain 直接返回
+            }
+        } else {
+            // LABEL_6：通关续局(1) / 失败读档继续(2)——不清通关进度、不走主菜单
+            scene = (m_runFlow == 2) ? 1 : 0;
+        }
+        m_runFlow = 0;
+
+        bool started = false;
+        switch (scene) {
+            case 0:
+            case 4:
+                if (scene == 4) {
+                    st.gameMode = 1; // [RE 0x401CBF] word_4991B6=1（时空之旅）
+                }
+                // mode1 == gameMode（newGameInit 里 restore 由 gameInited 决定，LABEL_6 保留进度）
+                started = startGame(*this, st.gameMode == 1);
+                if (!started) {
+                    RICH4_LOGI("startGame cancelled, back to main menu (RE 0x406DE7)");
+                }
+                break;
+            case 1:
+                started = loadGameFromSlot(*this, st.pendingLoadSlot); // [RE 0x402AC5]
+                if (!started) {
+                    RICH4_LOGI("loadGameFromSlot failed, back to main menu (RE 0x402AC5)");
+                }
+                break;
+            case 3:
+            default:
+                return; // 原版 case 3: gameShutdown + DestroyWindow
+        }
+        if (!started) {
+            continue; // 取消 → 下轮 LABEL_5 回主菜单
+        }
+
+        // [RE 0x401D6F] 游戏结束按 sceneRequest 分派（enterGameLoop 已退出，sceneRequest 保留至今）
+        if (st.quitGame) {
+            return;
+        }
+        const int v10 = st.sceneRequest;
+        st.sceneRequest = 0;
+        m_audio.setSwitchDays(0); // [RE 0x401DC4] g_musicTimer=0（切歌计时清零，迁入 Audio）
+        switch (v10) {
+            case 2: // 通关结算 → 续新游戏（LABEL_6，不清通关进度）
+                gameClearFlow(*this);
+                if (st.quitGame) {
+                    return;
+                }
+                m_runFlow = 1;
+                m_enterSwitchMusic = true; // [RE 0x401D14] LABEL_6 快速入局 enterGameLoop(1)
+                break;
+            case 3: // 通关结算 → 回主菜单（LABEL_5）
+                gameClearFlow(*this);
+                break;
+            case 4: { // [RE 0x403D74] 失败读档继续：弹原版 loadDialog 选档 → 载入续局；取消→主菜单
+                const int lslot = loadDialog(*this);
+                if (lslot >= 0) {
+                    st.pendingLoadSlot = lslot;
+                    m_runFlow = 2;
+                    // [RE 0x40412D/0x404135] loadDialog 尾：g_musicTimer≠0 → 清0+musicStop；
+                    //   musicPlayTrack(0) 顺序下一首。LABEL_6 scene1 enterGameLoop(1) 的
+                    //   换曲由 loadGameFromSlot 路径同标志消费（原版两处调用都推进游标）
+                    m_audio.setSwitchDays(0);
+                    m_enterSwitchMusic = true;
+                }
+                break;
+            }
+            case 1:
+            case 0:
+            default:
+                break; // → 下轮 LABEL_5 回主菜单
+        }
+    }
+}
+
+void Application::pumpEvents() {
+    // [RE 0x401B9C] WinMain 中 PeekMessageA(&Msg, 0, 0, 0, PM_REMOVE) 消息泵
+    SDL_Event event;
+    while (SDL_PollEvent(&event)) {
+        // [PORT 安卓] 触屏手势跟踪：长按到时注入一次 Esc（通用取消/关闭）
+        m_touch.handle(event);
+        // 原版 Msg.message == 18(WM_QUIT) 时返回 Msg.wParam
+        if (event.type == SDL_EVENT_QUIT) {
+            // [PORT 安卓] 返回键 → 模拟鼠标右键（原版右键是「取消/关闭」主语义）。
+            // 有模态时右键正好关掉它；顶层无模态时右键无处可去，才退回退出。
+            if (m_events.depth() > 0) {
+                // SDL3: SDL_GetMouseState 返回按键位掩码，坐标为 float；
+                // SDL_MouseButtonEvent 用 down（而非 SDL2 的 state）
+                float mx = 0, my = 0;
+                SDL_GetMouseState(&mx, &my);
+                SDL_Event rb{};
+                rb.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+                rb.button.windowID = SDL_GetWindowID(m_window.handle());
+                rb.button.button = SDL_BUTTON_RIGHT;
+                rb.button.down = true;
+                rb.button.clicks = 1;
+                rb.button.x = mx;
+                rb.button.y = my;
+                SDL_PushEvent(&rb);
+                rb.type = SDL_EVENT_MOUSE_BUTTON_UP;
+                rb.button.down = false;
+                SDL_PushEvent(&rb);
+                continue;
+            }
+            m_running = false;
+            continue;
+        }
+        // [NEW M4-A2] free/wide：窗口尺寸变化 → 延迟到 renderFrame 重建画布与逻辑呈现
+        if (m_autoScale && (event.type == SDL_EVENT_WINDOW_RESIZED ||
+                            event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED)) {
+            m_resizePending = true;
+            continue;
+        }
+        // [RE 0x4019DD WM_ACTIVATEAPP] 窗口失焦暂停音乐、回焦恢复（对等原版 pause mid/resume）
+        if (event.type == SDL_EVENT_WINDOW_FOCUS_LOST) {
+            m_audio.setMusicPaused(true);
+            continue;
+        }
+        if (event.type == SDL_EVENT_WINDOW_FOCUS_GAINED) {
+            m_audio.setMusicPaused(false);
+            continue;
+        }
+        // [PORT Win32:GetCursorPos] 鼠标事件坐标转换（定义见 transformMouseEvent）
+        transformMouseEvent(event);
+        // [NEW] 真实鼠标移动清除合成输入覆盖与调试选择器（脚本 select 仅在无人动鼠标时生效）
+        if (event.type == SDL_EVENT_MOUSE_MOTION) {
+            m_mouseOv = false;
+            debug::setSelectedObject(0);
+        }
+        // [PORT Win32:WM_LBUTTONUP] 模态 UI 点击标志（转盘 sub_43F7C6 提前停止；
+        //   原版检测 514/517/257，重写用按下以便即时反馈）
+        // [RE 0x4528B9/0x4544F6/0x45144F] 同步置演出打断标志（consumeSkipInput 消费）
+        if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == SDL_BUTTON_LEFT) {
+            m_uiClicked = true;
+            m_skipInput = true;
+        }
+        if (event.type == SDL_EVENT_KEY_DOWN &&
+            (event.key.key == SDLK_ESCAPE || event.key.key == SDLK_RETURN ||
+             event.key.key == SDLK_SPACE)) {
+            m_skipInput = true;
+        }
+        // [PORT Win32:SetWindowsHookExA(WH_KEYBOARD)] 原版全局键盘钩子 fn(0x401010)
+        // **先于**窗口过程无条件运行（钩子 return 0 不吞消息，故两者都处理原始按键）;
+        // 迁移: 每事件先执行钩子动作（含取消键抬起→合成右键），再交给窗口过程
+        // （定义见 Application::handleKeyboardHook）
+        handleKeyboardHook(event);
+        // [RE 0x4019DD] wndProc
+        // 依据: 0x4019DD 窗口过程; WM_DESTROY(2) 走 sub_401815+PostQuitMessage,
+        // 默认分支转发给 dword_48A010[nIDEvent]（模态栈顶），无处理器时 DefWindowProcA
+        // [NEW M4-D] 经 640 基准模态框架（宽画布居中；游戏内循环/非模态恒等直通）
+        const bool consumed = dispatchModalAware(&event);
+        if (!consumed) {
+            defaultEvent(event);
+        }
+        // [RE 0x401010] 钩子累积 word_46CB07 键位状态（定义见 handleKeyboardHook 依赖）
+        m_input.handleEvent(event);
+    }
+    // [PORT 安卓] 触屏长按到时注入一次 Esc（通用取消/关闭）。
+    // 放在事件泵尾部：本轮事件都处理完再注入，避免打乱当前事件序列；
+    // 下一轮 pumpEvents 会被 dialog handler 当 Esc 消费。
+    if (m_touch.pollFired()) {
+        SDL_Event esc{};
+        esc.type = SDL_EVENT_KEY_DOWN;
+        esc.key.windowID = SDL_GetWindowID(m_window.handle());
+        esc.key.key = SDLK_ESCAPE;
+        esc.key.scancode = SDL_SCANCODE_ESCAPE;
+        esc.key.down = true;
+        esc.key.repeat = false;
+        SDL_PushEvent(&esc);
+        esc.type = SDL_EVENT_KEY_UP;
+        esc.key.down = false;
+        SDL_PushEvent(&esc);
+    }
+}
+
+// [NEW M4-D] 640 基准 UI 派发：宽画布下"主菜单/选人/游戏内模态"整体水平居中。
+// 依据: 原版 UI 坐标全部基于 640x480 全屏；重写宽画布（wide 逻辑 853 / --canvas）下若
+//   原样直绘会贴左、右侧露出旧画面（银行/股市等全屏模态实机可见）。
+// 方案: 栈顶为 centerBase 层且逻辑宽 > 640 时——
+//   ① 进入该层时把两侧 (0..base)/(base+640..宽) 清黑（一次；模态绘制只覆盖 640 基准区）；
+//   ② 事件鼠标坐标平移 -base（handler 命中逻辑保持原版 640 基准，与 named region 同源）；
+//   ③ 绘制原点 +base（SurfaceOriginGuard 包住 handler 内全部绘制，与右栏 origin 机制同）。
+//   native/free（逻辑 640）与游戏内循环（centerBase=false）完全恒等直通。
+bool Application::dispatchModalAware(const SDL_Event* event) {
+    const int base = uiModalBaseX(m_surface);
+    if (!(base > 0 && m_events.depth() > 0 && m_events.topCenterBase())) {
+        // [NEW M4-D 实机] 从"两侧已填黑"的全屏剧场模态退出（或切到游戏内循环）时，画布
+        //   两侧仍是黑色（游戏画面被填黑覆盖且静止帧跳过重绘不会自愈）→ 标记下一帧强制
+        //   重绘栈顶（游戏循环 nullptr 分支 = renderGameFrame 全量，两侧游戏画面恢复）
+        if (m_modalBaseFilled) {
+            m_modalBaseFilled = false;
+            m_forceRepaint = true;
+        }
+        if (!event) {
+            if (EventStack::Handler h = m_events.top()) {
+                return h(nullptr, m_events.topUser());
+            }
+            return false;
+        }
+        return m_events.dispatch(*event);
+    }
+    // 两侧填黑仅对"全屏剧场模态"（铺底界面）：叠加式面板（设置/询问框/台词等，fillBars=false）
+    //   保留游戏画面；已填状态在 overlay 模态嵌套期间保持不变（如银行内弹确认框）
+    const auto fillModalBars = [&]() {
+        const int lw = uiLogicalWidth(m_surface);
+        const int lh = uiLogicalHeight(m_surface);
+        // [PORT 触屏实机四轮] 两侧统一填**黑色**（用户裁定）。此前试过：
+        //   纯黑=两条黑边；按行延展=横向拖影；边缘平均色=大块绿，都更难看。
+        //   640 界面在宽屏手机上左右本就无内容可画，黑色最干净。
+        if (base > 0) {
+            m_surface.fillRect(0, 0, base, lh, 0);
+        }
+        if (base + 640 < lw) {
+            m_surface.fillRect(base + 640, 0, lw - base - 640, lh, 0);
+        }
+    };
+    if (m_events.topFillBars() && !m_modalBaseFilled) {
+        m_modalBaseFilled = true;
+        // [NEW M4-D 实机] 填黑/背景重绘用绝对画布坐标且绕过模态绘制边界：嵌套在其它
+        //   centerBase 模态内进入时（如新闻/命运/魔法屋内调用 runAuction），外层
+        //   dispatchModalAware 的 SurfaceOriginGuard(=base) 与 paintClip(base..base+640)
+        //   仍在作用域 → 不归零/不关裁剪会把黑条填到错误位置或被裁掉
+        //   （实机"拍卖两侧没置黑"根因；顶层进入时两者本就是 0/-1，无行为差异）
+        SurfaceOriginGuard og0(m_surface, 0, 0);
+        SurfacePaintClipGuard pcg0(m_surface, -1, -1);
+        // [NEW M4-D 实机] 背景先以原版 640 布局重绘到居中区（宽屏世界布局直接保留会被
+        //   两侧黑边裁掉右栏 → "右栏被切半"观感；原版语义背景 = 完整 640 画面）。
+        //   仅游戏世界可用时（栈内有游戏内循环层）——主菜单/选人赛前模态不可重绘
+        if (m_events.hasGameplayLayer()) {
+            renderModalBackdrop(*this, base);
+        }
+        fillModalBars();
+    }
+    SDL_Event shifted;
+    const SDL_Event* ev = event;
+    if (event) {
+        switch (event->type) {
+            case SDL_EVENT_MOUSE_MOTION:
+                shifted = *event;
+                shifted.motion.x = event->motion.x - static_cast<float>(base);
+                ev = &shifted;
+                break;
+            case SDL_EVENT_MOUSE_BUTTON_DOWN:
+            case SDL_EVENT_MOUSE_BUTTON_UP:
+                shifted = *event;
+                shifted.button.x = event->button.x - static_cast<float>(base);
+                ev = &shifted;
+                break;
+            default:
+                break;
+        }
+    }
+    // [NEW M4-D 实机] 640 基准区裁剪：模态绘制限制在基准区（模拟原版 640×480 屏幕边界），
+    //   防止"移出屏幕"的过场动画（选人界面选完角色后玩家槽滑出等）画进宽画布两侧黑边
+    //   （观测为"黑边残影"）。产品代码在绘制中途的 setClipRect 由本处在 dispatch 后恢复。
+    int savedClip[4] = {0, 0, 0, 0};
+    getClipRect(savedClip[0], savedClip[1], savedClip[2], savedClip[3]);
+    setClipRect(base, 0, base + 640, uiLogicalHeight(m_surface));
+    const int savedPc0 = m_surface.paintClipX0();
+    const int savedPc1 = m_surface.paintClipX1();
+    // [NEW M4-D 实机] 模态绘制边界（存**设备坐标**：text 等落点已设备化，统一域）；
+    m_surface.setPaintClip(m_surface.logicalToDevice(base),
+                           m_surface.logicalToDevice(base + 640));
+    SurfaceOriginGuard og(m_surface, base, 0);
+    bool handled = false;
+    if (!ev) {
+        if (EventStack::Handler h = m_events.top()) {
+            handled = h(nullptr, m_events.topUser());
+        }
+    } else {
+        handled = m_events.dispatch(*ev);
+    }
+    setClipRect(savedClip[0], savedClip[1], savedClip[2], savedClip[3]);
+    m_surface.setPaintClip(savedPc0, savedPc1);
+    // [NEW M4-D 实机] handler 内可能全量重绘宽屏游戏画面（renderGameFrame 用于演出/预览），
+    //   把两侧黑边重新覆盖 → 返回后按栈顶重新填黑，保证全屏剧场模态两侧恒黑
+    //   （叠加式子模态 fillBars=false 不改动；栈顶已变（嵌套退出）时按其属性处理）
+    if (m_events.topFillBars()) {
+        // 填黑用绝对画布坐标（og 尚在作用域）+ 绕过本层恢复后的模态绘制边界
+        // （嵌套 fillBars 层时 savedPc0/Pc1 = 外层裁剪带，会把两侧黑条裁掉）
+        SurfaceOriginGuard og0(m_surface, 0, 0);
+        SurfacePaintClipGuard pcg0(m_surface, -1, -1);
+        fillModalBars();
+    }
+    return handled;
+}
+
+// [NEW M4-A2] free/wide：按窗口 drawable 重建画布与逻辑呈现（uiScale = 画布高/480）
+void Application::applyWindowResize() {
+    m_resizePending = false;
+    int w = 0;
+    int h = 0;
+    SDL_GetWindowSizeInPixels(m_window.handle(), &w, &h);
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+    // [NEW M4-D 实机] 画布 = 逻辑尺寸（设备/缩放比），绘制 scale 恒 1；呈现由 SDL
+    //   logical presentation 放大——绘制成本与 native 同级（原设备画布成本 ∝ 分辨率）。
+    const float deviceScale = static_cast<float>(h) / Surface::kHeight;
+    const int lw = std::max(640, static_cast<int>(w / deviceScale + 0.5f));
+    const int lh = Surface::kHeight;
+    if (lw == m_surface.width() && lh == m_surface.height()) {
+        m_renderer.setLogicalSize(lw, lh); // 等比缩放：逻辑尺寸未变，仅同步呈现
+        return;
+    }
+    // 旧画布上的光标保存块作废（按旧区域写回新画布可能越界）；区域快照的恢复有大小
+    // 校验兜底（restoreRegion 尺寸不匹配直接返回）
+    m_cursor.invalidate();
+    m_modalBaseFilled = false; // [NEW M4-D] 画布尺寸变化 → 640 基准模态两侧需重填
+    m_surface.destroy();
+    if (!m_surface.create(m_renderer.handle(), lw, lh)) {
+        RICH4_LOGE("applyWindowResize: surface recreate failed (%dx%d)", lw, lh);
+        return;
+    }
+    m_surface.setScale(1.0f);
+    m_renderer.setLogicalSize(lw, lh);
+    RICH4_LOGI("window resize: logical canvas %dx%d (device %dx%d)", lw, lh, w, h);
+}
+
+void Application::mouseDevicePos(int& x, int& y) const {
+    // [NEW M4-A2] 设备像素坐标（SDL 逻辑呈现 = 画布尺寸）
+    if (m_mouseOv) {
+        // [NEW] headless 合成输入覆盖（debug::move/click 直投；输入的为设计逻辑坐标）
+        x = m_surface.logicalToDevice(m_mouseOvX);
+        y = m_surface.logicalToDevice(m_mouseOvY);
+        return;
+    }
+    float wx = 0.0f;
+    float wy = 0.0f;
+    SDL_GetMouseState(&wx, &wy);
+    float lx = wx;
+    float ly = wy;
+    SDL_RenderCoordinatesFromWindow(m_renderer.handle(), wx, wy, &lx, &ly);
+    x = static_cast<int>(lx);
+    y = static_cast<int>(ly);
+}
+
+void Application::mouseLogicalPos(int& x, int& y) const {
+    // [NEW M4-A2] 设计逻辑坐标（UI 层坐标：设备 / scale；scale=1 恒等）
+    // [NEW M4-D 实机] 再减去 640 基准偏移：dispatchModalAware 对 centerBase 模态
+    //   的事件坐标做了 -base，这里必须用**同一个 base**，否则两条坐标源不一致。
+    // [PORT 触屏] 原来减的是 m_surface.originX()，但事件处理期间没有 SurfaceOriginGuard
+    //   在生效，origin 是 0（或上次绘制残留）→ 财神爷等用 mouseLogicalPos 驱动的小游戏
+    //   位置整体偏 base（宽屏手机约 200 逻辑像素，实机"娃娃不跟手/点不中"根因）。
+    //   改为显式算 base，与事件派发严格一致；游戏内循环（centerBase=false）恒 0。
+    int dx = 0;
+    int dy = 0;
+    mouseDevicePos(dx, dy);
+    const int base = (m_events.depth() > 0 && m_events.topCenterBase())
+                         ? uiModalBaseX(m_surface)
+                         : 0;
+    x = m_surface.deviceToLogical(dx) - base;
+    y = m_surface.deviceToLogical(dy);
+}
+
+void Application::transformMouseEvent(SDL_Event& event) {
+    // [PORT Win32:GetCursorPos] 替换依据: 原版全屏 640x480，鼠标屏幕坐标即游戏坐标；
+    // SDL 窗口可缩放 + letterbox 逻辑呈现，需把窗口坐标换算为 640x480 逻辑坐标
+    float lx = 0.0f;
+    float ly = 0.0f;
+    // [NEW M4-A2] 输出设计逻辑坐标（SDL 逻辑呈现 = 设备；再 /scale → 逻辑）
+    const float s = m_surface.scale();
+    const float inv = s > 0.0f ? 1.0f / s : 1.0f;
+    switch (event.type) {
+        case SDL_EVENT_MOUSE_MOTION:
+            if (SDL_RenderCoordinatesFromWindow(m_renderer.handle(), event.motion.x, event.motion.y,
+                                                &lx, &ly)) {
+                event.motion.x = lx * inv;
+                event.motion.y = ly * inv;
+            }
+            break;
+        case SDL_EVENT_MOUSE_BUTTON_DOWN:
+        case SDL_EVENT_MOUSE_BUTTON_UP:
+            if (SDL_RenderCoordinatesFromWindow(m_renderer.handle(), event.button.x, event.button.y,
+                                                &lx, &ly)) {
+                event.button.x = lx * inv;
+                event.button.y = ly * inv;
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+void Application::defaultEvent(const SDL_Event& event) {
+    // [RE 0x4019DD] 无模态处理器时调用 DefWindowProcA(hWnd, Msg, wParam, lParam)
+    // 键盘钩子行为见 handleKeyboardHook（0x401010）
+    (void)event;
+}
+
+void Application::handleKeyboardHook(const SDL_Event& event) {
+    // [RE 0x401010] 全局键盘钩子 fn：在窗口过程之外直接动作
+    // 依据: fn(0x401010) 读 word_497168 键位表：
+    //   word_497168/6A/6C/6E（游標上/右/下/左移）→ SetCursorPos(±10)
+    //   word_497170（確定執行）→ PostMessageA(WM_LBUTTONDOWN/UP)（word_46CB09 去重）
+    //   word_497172（取消指令）→ 抬起时 PostMessageA(WM_RBUTTONUP)（合成右键抬起，模态按右键机制处理）
+    // 迁移: SetCursorPos/PostMessageA → SDL_WarpMouseInWindow/SDL_PushEvent（逻辑像素 ±10）
+    if (event.type != SDL_EVENT_KEY_DOWN && event.type != SDL_EVENT_KEY_UP) {
+        return;
+    }
+    const uint8_t vk = sdlKeycodeToVk(event.key.key);
+    if (vk == 0) {
+        return;
+    }
+    const uint16_t* bind = m_input.bindings();
+    const bool down = event.type == SDL_EVENT_KEY_DOWN;
+
+    if (down) {
+        // 索引 0-3：游標上/右/下/左移（原版钩子以单键 wParam 比较，忽略修饰键）
+        int dx = 0;
+        int dy = 0;
+        if (vk == (bind[0] & 0xFF)) {
+            dy = -10;
+        } else if (vk == (bind[1] & 0xFF)) {
+            dx = 10;
+        } else if (vk == (bind[2] & 0xFF)) {
+            dy = 10;
+        } else if (vk == (bind[3] & 0xFF)) {
+            dx = -10;
+        }
+        if (dx != 0 || dy != 0) {
+            RICH4_LOGI("keyboard hook: cursor move (%d,%d) (RE 0x401010)", dx, dy);
+            float wx = 0.0f;
+            float wy = 0.0f;
+            SDL_GetMouseState(&wx, &wy);
+            float lx = wx;
+            float ly = wy;
+            SDL_RenderCoordinatesFromWindow(m_renderer.handle(), wx, wy, &lx, &ly);
+            // [NEW M4-A2] dx/dy 为设计逻辑像素 → 设备步长 × scale（scale=1 恒等）
+            const float s = m_surface.scale();
+            const float k = s > 0.0f ? s : 1.0f;
+            lx += static_cast<float>(dx) * k;
+            ly += static_cast<float>(dy) * k;
+            if (SDL_RenderCoordinatesToWindow(m_renderer.handle(), lx, ly, &wx, &wy)) {
+                SDL_WarpMouseInWindow(m_window.handle(), wx, wy);
+            }
+            return;
+        }
+    }
+    // 索引 4：確定執行 → 模拟左键（按下/抬起配对）
+    if (vk == (bind[4] & 0xFF)) {
+        if (down && !m_hookLeftDown) {
+            m_hookLeftDown = true;
+            RICH4_LOGI("keyboard hook: confirm click (RE 0x401010)");
+            pushMouseButton(SDL_EVENT_MOUSE_BUTTON_DOWN, SDL_BUTTON_LEFT);
+        } else if (!down && m_hookLeftDown) {
+            m_hookLeftDown = false;
+            pushMouseButton(SDL_EVENT_MOUSE_BUTTON_UP, SDL_BUTTON_LEFT);
+        }
+        return;
+    }
+    // 索引 5：取消指令 → 抬起时合成右键抬起（原版 lParam<0 → PostMessage WM_RBUTTONUP）
+    if (!down && vk == (bind[5] & 0xFF)) {
+        RICH4_LOGI("keyboard hook: cancel (RE 0x401010)");
+        pushMouseButton(SDL_EVENT_MOUSE_BUTTON_UP, SDL_BUTTON_RIGHT);
+    }
+}
+
+void Application::pushMouseButton(uint32_t type, uint8_t button) {
+    // [RE 0x401010] PostMessageA(hWnd, WM_LBUTTONDOWN/UP, ...) 迁移（定义见 handleKeyboardHook）
+    // 原版在 GetCursorPos 位置合成鼠标消息；lParam = x | (y << 16)
+    float wx = 0.0f;
+    float wy = 0.0f;
+    SDL_GetMouseState(&wx, &wy);
+    SDL_Event synth{};
+    synth.type = type;
+    synth.button.button = button;
+    synth.button.clicks = 1;
+    synth.button.x = wx;
+    synth.button.y = wy;
+    SDL_PushEvent(&synth);
+}
+
+void Application::renderFrame() {
+    // [RE 0x401B9C] 原版无主动渲染：由 InvalidateRect + WM_PAINT 驱动
+    // 0x40257A WM_PAINT: sub_40235D(移除光标) + BltFast(后台→主表面) + sub_402250(重绘光标)
+    // 迁移: 每帧上传 Surface 纹理; 光标按原版语义在绘制前移除、上传前重绘
+    // [NEW M4-A2] free/wide：resize 后重建画布（须在 beginFrame 前）
+    if (m_resizePending) {
+        applyWindowResize();
+        // [NEW M4-D] 画布重建后内容为空；tickMs=0 的层（主菜单/多数模态）不主动重绘，
+        //   会保留空画布/旧像素（实机"放大缩小窗口后留残影"）→ 强制重绘栈顶一次
+        m_forceRepaint = true;
+    }
+    m_renderer.beginFrame();
+    if (m_forceRepaint) {
+        m_forceRepaint = false;
+        dispatchModalAware(nullptr);
+    }
+
+    // [PORT WINMM:DirectSound] 音频混音喂流（每帧混合活动音效/音乐）
+    m_audio.update();
+
+    // [NEW] 调试：把鼠标移到指定逻辑坐标（截图验证悬停状态用）
+    if (m_shotCursorX >= 0 && m_frameCount == 1) {
+        if (SDL_RenderCoordinatesToWindow(m_renderer.handle(), static_cast<float>(m_shotCursorX),
+                                          static_cast<float>(m_shotCursorY), &m_shotWinX,
+                                          &m_shotWinY)) {
+            SDL_WarpMouseInWindow(m_window.handle(), m_shotWinX, m_shotWinY);
+        }
+    }
+    // [NEW] 调试：第 10 帧合成一次左键点击（窗口坐标，事件管线会转为逻辑坐标）
+    if (m_shotClick && m_frameCount == 10) {
+        SDL_Event ev{};
+        ev.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+        ev.button.button = SDL_BUTTON_LEFT;
+        ev.button.clicks = 1;
+        ev.button.x = m_shotWinX;
+        ev.button.y = m_shotWinY;
+        SDL_PushEvent(&ev);
+        ev.type = SDL_EVENT_MOUSE_BUTTON_UP;
+        SDL_PushEvent(&ev);
+    }
+    // [NEW] 调试：第 20 帧移动到第二个逻辑坐标并点击（先 warp 产生 MOUSE_MOTION 更新悬停）
+    if (m_shotClick2X >= 0 && m_frameCount == 20) {
+        float wx = 0.0f;
+        float wy = 0.0f;
+        if (SDL_RenderCoordinatesToWindow(m_renderer.handle(), static_cast<float>(m_shotClick2X),
+                                          static_cast<float>(m_shotClick2Y), &wx, &wy)) {
+            SDL_WarpMouseInWindow(m_window.handle(), wx, wy);
+            SDL_Event ev{};
+            ev.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+            ev.button.button = SDL_BUTTON_LEFT;
+            ev.button.clicks = 1;
+            ev.button.x = wx;
+            ev.button.y = wy;
+            SDL_PushEvent(&ev);
+            ev.type = SDL_EVENT_MOUSE_BUTTON_UP;
+            SDL_PushEvent(&ev);
+        }
+    }
+    // [NEW] 调试：第 30 帧移动到第三个逻辑坐标并点击
+    if (m_shotClick3X >= 0 && m_frameCount == 30) {
+        float wx = 0.0f;
+        float wy = 0.0f;
+        if (SDL_RenderCoordinatesToWindow(m_renderer.handle(), static_cast<float>(m_shotClick3X),
+                                          static_cast<float>(m_shotClick3Y), &wx, &wy)) {
+            SDL_WarpMouseInWindow(m_window.handle(), wx, wy);
+            SDL_Event ev{};
+            ev.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+            ev.button.button = SDL_BUTTON_LEFT;
+            ev.button.clicks = 1;
+            ev.button.x = wx;
+            ev.button.y = wy;
+            SDL_PushEvent(&ev);
+            ev.type = SDL_EVENT_MOUSE_BUTTON_UP;
+            SDL_PushEvent(&ev);
+        }
+    }
+    // [NEW] 调试：第 35 帧移动到第四个逻辑坐标并点击
+    if (m_shotClick4X >= 0 && m_frameCount == 35) {
+        float wx = 0.0f;
+        float wy = 0.0f;
+        if (SDL_RenderCoordinatesToWindow(m_renderer.handle(), static_cast<float>(m_shotClick4X),
+                                          static_cast<float>(m_shotClick4Y), &wx, &wy)) {
+            SDL_WarpMouseInWindow(m_window.handle(), wx, wy);
+            SDL_Event ev{};
+            ev.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+            ev.button.button = SDL_BUTTON_LEFT;
+            ev.button.clicks = 1;
+            ev.button.x = wx;
+            ev.button.y = wy;
+            SDL_PushEvent(&ev);
+            ev.type = SDL_EVENT_MOUSE_BUTTON_UP;
+            SDL_PushEvent(&ev);
+        }
+    }
+    // [NEW] 调试：第 38 帧移动到第五个逻辑坐标并点击
+    if (m_shotClick5X >= 0 && m_frameCount == 38) {
+        float wx = 0.0f;
+        float wy = 0.0f;
+        if (SDL_RenderCoordinatesToWindow(m_renderer.handle(), static_cast<float>(m_shotClick5X),
+                                          static_cast<float>(m_shotClick5Y), &wx, &wy)) {
+            SDL_WarpMouseInWindow(m_window.handle(), wx, wy);
+            SDL_Event ev{};
+            ev.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+            ev.button.button = SDL_BUTTON_LEFT;
+            ev.button.clicks = 1;
+            ev.button.x = wx;
+            ev.button.y = wy;
+            SDL_PushEvent(&ev);
+            ev.type = SDL_EVENT_MOUSE_BUTTON_UP;
+            SDL_PushEvent(&ev);
+        }
+    }
+    // [NEW] 调试：第 41 帧移动到第六个逻辑坐标并点击
+    if (m_shotClick6X >= 0 && m_frameCount == 41) {
+        float wx = 0.0f;
+        float wy = 0.0f;
+        if (SDL_RenderCoordinatesToWindow(m_renderer.handle(), static_cast<float>(m_shotClick6X),
+                                          static_cast<float>(m_shotClick6Y), &wx, &wy)) {
+            SDL_WarpMouseInWindow(m_window.handle(), wx, wy);
+            SDL_Event ev{};
+            ev.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+            ev.button.button = SDL_BUTTON_LEFT;
+            ev.button.clicks = 1;
+            ev.button.x = wx;
+            ev.button.y = wy;
+            SDL_PushEvent(&ev);
+            ev.type = SDL_EVENT_MOUSE_BUTTON_UP;
+            SDL_PushEvent(&ev);
+        }
+    }
+    // [NEW] 调试：第 43 帧移动到第七个逻辑坐标并点击
+    if (m_shotClick7X >= 0 && m_frameCount == 43) {
+        float wx = 0.0f;
+        float wy = 0.0f;
+        if (SDL_RenderCoordinatesToWindow(m_renderer.handle(), static_cast<float>(m_shotClick7X),
+                                          static_cast<float>(m_shotClick7Y), &wx, &wy)) {
+            SDL_WarpMouseInWindow(m_window.handle(), wx, wy);
+            SDL_Event ev{};
+            ev.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+            ev.button.button = SDL_BUTTON_LEFT;
+            ev.button.clicks = 1;
+            ev.button.x = wx;
+            ev.button.y = wy;
+            SDL_PushEvent(&ev);
+            ev.type = SDL_EVENT_MOUSE_BUTTON_UP;
+            SDL_PushEvent(&ev);
+        }
+    }
+
+    // [NEW] 调试：第 21 帧移动到指定逻辑坐标（只悬停不点击）
+    if (m_shotHoverX >= 0 && m_frameCount == 21) {
+        float wx = 0.0f;
+        float wy = 0.0f;
+        if (SDL_RenderCoordinatesToWindow(m_renderer.handle(), static_cast<float>(m_shotHoverX),
+                                          static_cast<float>(m_shotHoverY), &wx, &wy)) {
+            SDL_WarpMouseInWindow(m_window.handle(), wx, wy);
+        }
+    }
+
+    // [NEW] 调试：第 25 帧合成 ESC 按下
+    if (m_shotEsc && m_frameCount == m_shotEscFrame) {
+        RICH4_LOGI("auto-esc: synthesize ESC at frame %d", m_frameCount);
+        SDL_Event ev{};
+        ev.type = SDL_EVENT_KEY_DOWN;
+        ev.key.key = SDLK_ESCAPE;
+        ev.key.scancode = SDL_SCANCODE_ESCAPE;
+        SDL_PushEvent(&ev);
+    }
+
+    // [NEW] 调试：在指定帧执行逻辑坐标拖拽（视角拖拽验证）
+    if (m_gameDragX1 >= 0 && m_frameCount == m_gameDragFrame) {
+        float wx1 = 0.0f;
+        float wy1 = 0.0f;
+        float wx2 = 0.0f;
+        float wy2 = 0.0f;
+        if (SDL_RenderCoordinatesToWindow(m_renderer.handle(), static_cast<float>(m_gameDragX1),
+                                          static_cast<float>(m_gameDragY1), &wx1, &wy1) &&
+            SDL_RenderCoordinatesToWindow(m_renderer.handle(), static_cast<float>(m_gameDragX2),
+                                          static_cast<float>(m_gameDragY2), &wx2, &wy2)) {
+            RICH4_LOGI("game-drag frame=%d (%d,%d)->(%d,%d)", m_frameCount, m_gameDragX1,
+                       m_gameDragY1, m_gameDragX2, m_gameDragY2);
+            SDL_WarpMouseInWindow(m_window.handle(), wx1, wy1);
+            SDL_Event ev{};
+            ev.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+            ev.button.button = SDL_BUTTON_LEFT;
+            ev.button.clicks = 1;
+            ev.button.x = wx1;
+            ev.button.y = wy1;
+            SDL_PushEvent(&ev);
+            ev.type = SDL_EVENT_MOUSE_MOTION;
+            ev.motion.x = wx2;
+            ev.motion.y = wy2;
+            SDL_PushEvent(&ev);
+            ev.type = SDL_EVENT_MOUSE_BUTTON_UP;
+            ev.button.x = wx2;
+            ev.button.y = wy2;
+            SDL_PushEvent(&ev);
+        }
+    }
+
+    // [NEW] 调试：在指定帧点击逻辑坐标（游戏内交互验证，如小地图旋转/工具条按钮）
+    if (m_gameClickX >= 0 && m_frameCount == m_gameClickFrame) {
+        float wx = 0.0f;
+        float wy = 0.0f;
+        if (SDL_RenderCoordinatesToWindow(m_renderer.handle(), static_cast<float>(m_gameClickX),
+                                          static_cast<float>(m_gameClickY), &wx, &wy)) {
+            RICH4_LOGI("game-click frame=%d logical=(%d,%d) window=(%.0f,%.0f)", m_frameCount,
+                       m_gameClickX, m_gameClickY, wx, wy);
+            SDL_WarpMouseInWindow(m_window.handle(), wx, wy);
+            SDL_Event ev{};
+            ev.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+            ev.button.button = SDL_BUTTON_LEFT;
+            ev.button.clicks = 1;
+            ev.button.x = wx;
+            ev.button.y = wy;
+            SDL_PushEvent(&ev);
+            ev.type = SDL_EVENT_MOUSE_BUTTON_UP;
+            SDL_PushEvent(&ev);
+        }
+    }
+
+    // [NEW] 调试：在指定帧再次点击逻辑坐标（游戏内菜单打开后再点按钮）
+    if (m_gameClick2X >= 0 && m_frameCount == m_gameClick2Frame) {
+        float wx = 0.0f;
+        float wy = 0.0f;
+        if (SDL_RenderCoordinatesToWindow(m_renderer.handle(), static_cast<float>(m_gameClick2X),
+                                          static_cast<float>(m_gameClick2Y), &wx, &wy)) {
+            RICH4_LOGI("game-click2 frame=%d logical=(%d,%d) window=(%.0f,%.0f)", m_frameCount,
+                       m_gameClick2X, m_gameClick2Y, wx, wy);
+            SDL_WarpMouseInWindow(m_window.handle(), wx, wy);
+            SDL_Event ev{};
+            ev.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+            ev.button.button = SDL_BUTTON_LEFT;
+            ev.button.clicks = 1;
+            ev.button.x = wx;
+            ev.button.y = wy;
+            SDL_PushEvent(&ev);
+            ev.type = SDL_EVENT_MOUSE_BUTTON_UP;
+            SDL_PushEvent(&ev);
+        }
+    }
+
+    // [NEW] 调试：第三次点击逻辑坐标（确认框 YES 等）
+    if (m_gameClick3X >= 0 && m_frameCount == m_gameClick3Frame) {
+        float wx = 0.0f;
+        float wy = 0.0f;
+        if (SDL_RenderCoordinatesToWindow(m_renderer.handle(), static_cast<float>(m_gameClick3X),
+                                          static_cast<float>(m_gameClick3Y), &wx, &wy)) {
+            RICH4_LOGI("game-click3 frame=%d logical=(%d,%d) window=(%.0f,%.0f)", m_frameCount,
+                       m_gameClick3X, m_gameClick3Y, wx, wy);
+            SDL_WarpMouseInWindow(m_window.handle(), wx, wy);
+            SDL_Event ev{};
+            ev.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+            ev.button.button = SDL_BUTTON_LEFT;
+            ev.button.clicks = 1;
+            ev.button.x = wx;
+            ev.button.y = wy;
+            SDL_PushEvent(&ev);
+            ev.type = SDL_EVENT_MOUSE_BUTTON_UP;
+            SDL_PushEvent(&ev);
+        }
+    }
+
+    // [NEW] 调试：第四次点击逻辑坐标（面板内多级交互验证，如页签→子页签）
+    if (m_gameClick4X >= 0 && m_frameCount == m_gameClick4Frame) {
+        float wx = 0.0f;
+        float wy = 0.0f;
+        if (SDL_RenderCoordinatesToWindow(m_renderer.handle(), static_cast<float>(m_gameClick4X),
+                                          static_cast<float>(m_gameClick4Y), &wx, &wy)) {
+            RICH4_LOGI("game-click4 frame=%d logical=(%d,%d) window=(%.0f,%.0f)", m_frameCount,
+                       m_gameClick4X, m_gameClick4Y, wx, wy);
+            SDL_WarpMouseInWindow(m_window.handle(), wx, wy);
+            SDL_Event ev{};
+            ev.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+            ev.button.button = SDL_BUTTON_LEFT;
+            ev.button.clicks = 1;
+            ev.button.x = wx;
+            ev.button.y = wy;
+            SDL_PushEvent(&ev);
+            ev.type = SDL_EVENT_MOUSE_BUTTON_UP;
+            SDL_PushEvent(&ev);
+        }
+    }
+
+    // [NEW] 调试：第五次点击逻辑坐标
+    if (m_gameClick5X >= 0 && m_frameCount == m_gameClick5Frame) {
+        float wx = 0.0f;
+        float wy = 0.0f;
+        if (SDL_RenderCoordinatesToWindow(m_renderer.handle(), static_cast<float>(m_gameClick5X),
+                                          static_cast<float>(m_gameClick5Y), &wx, &wy)) {
+            RICH4_LOGI("game-click5 frame=%d logical=(%d,%d) window=(%.0f,%.0f)", m_frameCount,
+                       m_gameClick5X, m_gameClick5Y, wx, wy);
+            SDL_WarpMouseInWindow(m_window.handle(), wx, wy);
+            SDL_Event ev{};
+            ev.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+            ev.button.button = SDL_BUTTON_LEFT;
+            ev.button.clicks = 1;
+            ev.button.x = wx;
+            ev.button.y = wy;
+            SDL_PushEvent(&ev);
+            ev.type = SDL_EVENT_MOUSE_BUTTON_UP;
+            SDL_PushEvent(&ev);
+        }
+    }
+
+    // [NEW] 调试：任意帧合成按键（--game-key "ctrl+shift+i,1500"；支持 ctrl+/shift+ 修饰）
+    for (const auto& [spec, frame] : m_gameKeys) {
+        if (m_frameCount != frame) {
+            continue;
+        }
+        std::string name = spec;
+        SDL_Keymod mod = SDL_KMOD_NONE;
+        for (;;) {
+            if (name.rfind("ctrl+", 0) == 0) {
+                mod |= SDL_KMOD_CTRL;
+                name = name.substr(5);
+                continue;
+            }
+            if (name.rfind("shift+", 0) == 0) {
+                mod |= SDL_KMOD_SHIFT;
+                name = name.substr(6);
+                continue;
+            }
+            break;
+        }
+        const SDL_Keycode key = SDL_GetKeyFromName(name.c_str());
+        if (key == SDLK_UNKNOWN) {
+            RICH4_LOGW("game-key: unknown key '%s' at frame %d", spec.c_str(), frame);
+            continue;
+        }
+        RICH4_LOGI("game-key frame=%d spec=%s", m_frameCount, spec.c_str());
+        auto pushKey = [&](SDL_Keycode k, SDL_EventType type) {
+            SDL_Event ev{};
+            ev.type = type;
+            ev.key.key = k;
+            ev.key.scancode = SDL_GetScancodeFromKey(k, nullptr);
+            ev.key.mod = mod;
+            SDL_PushEvent(&ev);
+        };
+        if ((mod & SDL_KMOD_CTRL) != 0) {
+            pushKey(SDLK_LCTRL, SDL_EVENT_KEY_DOWN);
+        }
+        if ((mod & SDL_KMOD_SHIFT) != 0) {
+            pushKey(SDLK_LSHIFT, SDL_EVENT_KEY_DOWN);
+        }
+        pushKey(key, SDL_EVENT_KEY_DOWN);
+        pushKey(key, SDL_EVENT_KEY_UP);
+        if ((mod & SDL_KMOD_SHIFT) != 0) {
+            pushKey(SDLK_LSHIFT, SDL_EVENT_KEY_UP);
+        }
+        if ((mod & SDL_KMOD_CTRL) != 0) {
+            pushKey(SDLK_LCTRL, SDL_EVENT_KEY_UP);
+        }
+    }
+
+    // [NEW] 调试：在指定帧合成 ESC 按下+抬起（游戏内取消操作验证）
+    if (m_gameEscFrame >= 0 && m_frameCount == m_gameEscFrame) {
+        RICH4_LOGI("game-esc: synthesize ESC at frame %d", m_frameCount);
+        SDL_Event ev{};
+        ev.type = SDL_EVENT_KEY_DOWN;
+        ev.key.key = SDLK_ESCAPE;
+        ev.key.scancode = SDL_SCANCODE_ESCAPE;
+        SDL_PushEvent(&ev);
+        ev.type = SDL_EVENT_KEY_UP;
+        SDL_PushEvent(&ev);
+    }
+
+    // [NEW] 调试：在指定帧合成右键按下+抬起（小地图右键回玩家视角验证）
+    if (m_gameRClickX >= 0 && m_frameCount == m_gameRClickFrame) {
+        float wx = 0.0f;
+        float wy = 0.0f;
+        if (SDL_RenderCoordinatesToWindow(m_renderer.handle(), static_cast<float>(m_gameRClickX),
+                                          static_cast<float>(m_gameRClickY), &wx, &wy)) {
+            RICH4_LOGI("game-rclick frame=%d logical=(%d,%d) window=(%.0f,%.0f)", m_frameCount,
+                       m_gameRClickX, m_gameRClickY, wx, wy);
+            SDL_WarpMouseInWindow(m_window.handle(), wx, wy);
+            SDL_Event ev{};
+            ev.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+            ev.button.button = SDL_BUTTON_RIGHT;
+            ev.button.clicks = 1;
+            ev.button.x = wx;
+            ev.button.y = wy;
+            SDL_PushEvent(&ev);
+            ev.type = SDL_EVENT_MOUSE_BUTTON_UP;
+            SDL_PushEvent(&ev);
+        }
+    }
+
+    // [NEW] 调试：第 35 帧合成按键按下+抬起（--auto-key，验证热键捕获；支持 "ctrl+x"）
+    if (!m_shotKey.empty() && m_frameCount == 35) {
+        std::string name = m_shotKey;
+        const bool ctrl = name.rfind("ctrl+", 0) == 0;
+        if (ctrl) {
+            name = name.substr(5);
+        }
+        const SDL_Keycode key = SDL_GetKeyFromName(name.c_str());
+        if (key != SDLK_UNKNOWN) {
+            SDL_Event ev{};
+            if (ctrl) {
+                ev.type = SDL_EVENT_KEY_DOWN;
+                ev.key.key = SDLK_LCTRL;
+                ev.key.scancode = SDL_SCANCODE_LCTRL;
+                SDL_PushEvent(&ev);
+            }
+            ev.type = SDL_EVENT_KEY_DOWN;
+            ev.key.key = key;
+            ev.key.scancode = SDL_GetScancodeFromKey(key, nullptr);
+            SDL_PushEvent(&ev);
+            ev.type = SDL_EVENT_KEY_UP;
+            SDL_PushEvent(&ev);
+            if (ctrl) {
+                ev.type = SDL_EVENT_KEY_UP;
+                ev.key.key = SDLK_LCTRL;
+                ev.key.scancode = SDL_SCANCODE_LCTRL;
+                SDL_PushEvent(&ev);
+            }
+        }
+    }
+
+    // [RE 0x401F98] 光标定时器（原版 fptc 20ms）：动画推进 + 位置跟踪
+    // [NEW M4-A2] 光标按设备像素定位（A2 光标按 scale 放大绘制）
+    int mx = 0;
+    int my = 0;
+    mouseDevicePos(mx, my);
+    // [NEW] 演出段隐藏软件光标（现代化增强，原版全程自绘）：事件 FLC 阻塞播放/冻结
+    //   （eventFlcActive）与跳伞入场（parachuteActive）期间不显示；此处统一驱动，
+    //   与 Cursor::setHidden 的模态界面级用法（乐透开奖/月结全身像）并存
+    const bool perfHidden = m_state.parachuteActive || m_state.eventFlcActive;
+    if (perfHidden != m_cursor.hidden()) {
+        m_cursor.setHidden(m_surface, perfHidden);
+    }
+    m_cursor.update(m_surface, mx, my);
+    if (!m_cursor.visible()) {
+        // [RE 0x402250] sub_402250：绘制后重绘光标
+        m_cursor.compose(m_surface, mx, my);
+    }
+    m_surface.present(m_renderer.handle());
+
+    // [NEW] 调试截图（含光标），供与原版画面比对
+    ++m_frameCount;
+    if (!m_shotPath.empty() && m_frameCount >= m_shotFrame) {
+        m_surface.saveBmp(m_shotPath.c_str());
+        m_shotPath.clear();
+        m_running = false;
+    }
+
+    // [RE 0x40235D] sub_40235D：绘制前移除光标，保持 Surface 为干净内容
+    m_cursor.uncompose(m_surface);
+
+    m_renderer.present();
+
+    // [NEW M4-A2] --stats：每 120 帧输出 FPS / 平均帧耗时（定位放大后的性能瓶颈）
+    if (m_stats) {
+        const uint64_t now = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count());
+        if (m_statsWindowUs == 0) {
+            m_statsWindowUs = now;
+        }
+        if (++m_statsFrames >= 120) {
+            const double msPerFrame =
+                static_cast<double>(now - m_statsWindowUs) / 1000.0 / m_statsFrames;
+            RICH4_LOGI("perf: %.1f FPS (%.2f ms/frame) canvas=%dx%d scale=%.2f",
+                       msPerFrame > 0.0 ? 1000.0 / msPerFrame : 0.0, msPerFrame, m_surface.width(),
+                       m_surface.height(), static_cast<double>(m_surface.scale()));
+            m_statsFrames = 0;
+            m_statsWindowUs = now;
+        }
+    }
+
+    // [NEW] headless 调试脚本执行器每帧步进（docs/testing.md；无脚本时仅一次入队检查）
+    debug::tick(*this);
+}
+
+void Application::shutdown() {
+    // [RE 0x401815] gameShutdown（幂等）
+    gameShutdown(*this);
+    m_cursor.shutdown();
+    m_text.shutdown();
+    m_surface.destroy();
+    m_renderer.destroy();
+    m_window.destroy();
+    SDL_Quit();
+}
+
+} // namespace rich4

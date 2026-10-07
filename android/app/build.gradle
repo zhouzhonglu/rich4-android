@@ -1,0 +1,55 @@
+plugins {
+     id 'com.android.application'
+}
+
+// 预编译模式：native 库由 NDK + CMake 交叉编译好（见 android/app/jni/），
+// 这里只负责打包，不再触发 externalNativeBuild。
+android {
+    namespace "org.libsdl.app"
+    compileSdkVersion 34
+    buildToolsVersion "34.0.0"
+
+    defaultConfig {
+        applicationId "xyz.a078868.rich4"
+        minSdkVersion 21
+        targetSdkVersion 34
+        versionCode 22
+        versionName "22.0"
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    sourceSets {
+        main {
+            // 预编译的 libmain.so / libSDL3.so
+            jniLibs.srcDirs = ['src/main/jniLibs']
+            // 游戏数据（mkf/mid）+ 字体；首次启动由 SDL_main 提取到内部存储
+            assets.srcDirs = ['src/main/assets']
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
+    lint {
+        abortOnError = false
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+}

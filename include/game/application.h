@@ -1,0 +1,335 @@
+#pragma once
+
+#include <SDL3/SDL.h>
+
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "game/app/event_stack.h"
+#include "game/game_state.h"
+#include "game/platform/audio.h"
+#include "game/platform/input.h"
+#include "game/platform/renderer.h"
+#include "game/platform/touch_gestures.h"
+#include "game/platform/window.h"
+#include "game/render/cursor.h"
+#include "game/render/surface.h"
+#include "game/render/text.h"
+
+namespace rich4 {
+
+// 应用外壳：对应原始 WinMain (0x401B9C) 的窗口创建与消息循环职责。
+// 依据: 0x401B9C 反编译; 注册窗口类 + CreateWindowExA + sub_4015D6 初始化 +
+//       PeekMessageA 主循环 + sub_401815 清理
+class Application {
+public:
+    // [NEW M4-A2] 显示配置（preset 解析结果；默认 = native 640x480 / scale 1.0）：
+    //   canvasWidth/Height：运行期画布尺寸（0 = 按 uiScale 推导 = round(640×s)×round(480×s)）
+    //   uiScale：绘制缩放（逻辑 640x480 → 设备像素）；1.0 = native 恒等
+    //   autoScale（wide/free preset）：画布 = 窗口 drawable 像素、uiScale = 画布高/480、
+    //   并处理 SDL_EVENT_WINDOW_RESIZED 重建画布（此时忽略 canvasWidth/Height/uiScale）
+    struct DisplayConfig {
+        int windowWidth = 1280;
+        int windowHeight = 960;
+        int canvasWidth = 0;
+        int canvasHeight = 0;
+        float uiScale = 1.0f;
+        bool autoScale = false;
+        // [NEW M4-D 实机] 呈现放大过滤（默认线性；1:1 时无差别）
+        bool linearFilter = true;
+        // [NEW M4-F] 垂直同步/全屏（rich4.ini [display]）
+        bool vsync = true;
+        bool fullscreen = false;
+    };
+    // [PORT 安卓/clang] 默认实参 DisplayConfig{} 不能写在类内声明上（C++ [class.mem]：
+    // 类内默认实参不得使用同类的默认成员初始化器，clang 报 "default member initializer
+    // needed within definition of enclosing class"，GCC/MSVC 宽容）。改为内联转发重载——
+    // 默认值放在成员函数体内合法，两个重载保持原有 2/3 参调用方式不变。
+    bool init(const std::string& gameDir, bool headless = false) {
+        return init(gameDir, headless, DisplayConfig{});
+    }
+    bool init(const std::string& gameDir, bool headless, const DisplayConfig& display);
+    void run();
+    void shutdown();
+
+    // [NEW M4-A2] --stats：每 120 帧输出 FPS/帧耗时（定位放大后的性能瓶颈；无原版对应）
+    void setStats(bool on) { m_stats = on; }
+
+    // 对应原版 PeekMessageA 消息泵 + WndProc(0x4019DD) 分发
+    void pumpEvents();
+    // 对应原版 InvalidateRect/WM_PAINT 驱动的表面绘制
+    void renderFrame();
+
+    // [NEW M4-D] 640 基准 UI 派发（宽画布水平居中框架）：
+    //   栈顶为 centerBase 层且逻辑画布宽 > 640 时——进入时清两侧、事件鼠标坐标平移、
+    //   绘制原点偏移（SurfaceOriginGuard）包住 handler；否则恒等直通。
+    //   event == nullptr 表示"模态进入/重绘"（原版 PostMessage 0x401）。
+    bool dispatchModalAware(const SDL_Event* event);
+
+    bool running() const { return m_running; }
+    void quit() { m_running = false; }
+
+    EventStack& events() { return m_events; }
+    GameState& gameState() { return m_state; }
+    Window& window() { return m_window; }
+    Renderer& renderer() { return m_renderer; }
+    Input& input() { return m_input; }
+    Audio& audio() { return m_audio; }
+    Surface& surface() { return m_surface; }
+    Cursor& cursor() { return m_cursor; }
+    TextRenderer& text() { return m_text; }
+    const std::string& gameDir() const { return m_gameDir; }
+    // [NEW] headless 测试运行标志（docs/testing.md；dummy 驱动+虚拟时钟+输入直投）
+    bool headless() const { return m_headless; }
+    // [NEW] 媒体目录（音乐/视频）：<gameDir>/Media，回退 <gameDir>/../Media
+    const std::string& mediaDir() const { return m_mediaDir; }
+
+    // 鼠标位置（设计逻辑坐标 640x480；scale>1 时为设备坐标 / scale）。
+    // [NEW M4-A2] UI 命中/对话框一律用本坐标；地图物件命中（mapHitRegions 设备坐标）
+    //   请先经 surface().logicalToDevice() 或使用 mouseDevicePos
+    void mouseLogicalPos(int& x, int& y) const;
+    // [NEW M4-A2] 鼠标设备像素坐标（画布坐标；光标定位用）
+    void mouseDevicePos(int& x, int& y) const;
+    // [NEW] headless 合成输入的鼠标覆盖：调试命令 move/click 直投时设定逻辑坐标，
+    //   mouseLogicalPos 优先返回它；真实鼠标事件到达（pumpEvents）即清除
+    void setMouseOverride(int x, int y) {
+        m_mouseOvX = x;
+        m_mouseOvY = y;
+        m_mouseOv = true;
+    }
+
+    // [PORT] 模态 UI 点击（原版 WM_LBUTTONUP 消息）：
+    //   转盘 sub_43F7C6 等阻塞 UI 用点击提前结束/加速；每次消费后清除
+    bool consumeUiClick() {
+        const bool clicked = m_uiClicked;
+        m_uiClicked = false;
+        return clicked;
+    }
+    // [NEW] 合成点击（debug move/click 直投）也置位 uiClicked（与真实按下语义一致）
+    void setUiClicked() {
+        m_uiClicked = true;
+        m_skipInput = true;
+    }
+
+    // [RE 0x4528B9/0x4544F6/0x45144F] 演出打断（跳过加速）标志：
+    // 依据: 原版 sub_4528B9/sub_4544F6 延时消息泵与 flcPlay（g_flcInterruptible=
+    //       flcOpen flags&2，0x48C880）检测 WM_LBUTTONUP(514)/WM_MBUTTONDOWN(517)/
+    //       WM_KEYUP(257) 即提前结束等待并吞掉该消息（PM_REMOVE 不派发窗口过程）;
+    // 迁移: 左键按下 或 Esc/Enter/Space 按下置位，showMessage/playLine/playEventFlc
+    //       等演出循环 consumeSkipInput() 轮询消费（一次性，不穿透下层逻辑）
+    bool consumeSkipInput() {
+        const bool v = m_skipInput;
+        m_skipInput = false;
+        return v;
+    }
+    void setSkipInput() { m_skipInput = true; }
+
+    // [RE 0x401CFC/0x401D14] enterGameLoop(a1) 续局换曲标志：LABEL_6 快速入局
+    //   （通关续战 runFlow=1 / 失败读档 runFlow=2）置位 → enterGameLoop 内
+    //   musicPlayTrack(0) 顺序下一首；主菜单完整新开局不置位（a1=0 不换曲，
+    //   开局曲=playIntro musicPlayTrack(1) 游标0 第一首）
+    void setEnterSwitchMusic(bool on) { m_enterSwitchMusic = on; }
+    bool consumeEnterSwitchMusic() {
+        const bool v = m_enterSwitchMusic;
+        m_enterSwitchMusic = false;
+        return v;
+    }
+
+    // [NEW] 调试：第 25 帧合成 ESC 按下（验证弹出层关闭/主菜单无操作）
+    void setAutoEsc(bool on, int frame = 25) {
+        m_shotEsc = on;
+        m_shotEscFrame = frame;
+    }
+    // [NEW] 调试：第 35 帧合成按键（SDL_GetKeyFromName 名称，如 "F5"），验证热键捕获
+    void setAutoKey(const std::string& name) { m_shotKey = name; }
+    // [NEW] 调试：第 21 帧移动鼠标到逻辑坐标（只悬停不点击）
+    void setHoverPos(int x, int y) {
+        m_shotHoverX = x;
+        m_shotHoverY = y;
+    }
+
+    // [NEW] 调试：在指定帧点击逻辑坐标（游戏内交互验证，如小地图旋转/工具条按钮）
+    void setGameClick(int x, int y, int frame) {
+        m_gameClickX = x;
+        m_gameClickY = y;
+        m_gameClickFrame = frame;
+    }
+
+    // [NEW] 调试：在指定帧执行逻辑坐标拖拽 DOWN(x1,y1)→MOTION(x2,y2)→UP（视角拖拽验证）
+    void setGameDrag(int x1, int y1, int x2, int y2, int frame) {
+        m_gameDragX1 = x1;
+        m_gameDragY1 = y1;
+        m_gameDragX2 = x2;
+        m_gameDragY2 = y2;
+        m_gameDragFrame = frame;
+    }
+
+    // [NEW] 调试：在指定帧合成右键按下+抬起（小地图右键回到玩家视角验证）
+    void setGameRClick(int x, int y, int frame) {
+        m_gameRClickX = x;
+        m_gameRClickY = y;
+        m_gameRClickFrame = frame;
+    }
+
+    // [NEW] 调试：在指定帧再次点击逻辑坐标（如游戏内菜单打开后再点按钮）
+    void setGameClick2(int x, int y, int frame) {
+        m_gameClick2X = x;
+        m_gameClick2Y = y;
+        m_gameClick2Frame = frame;
+    }
+
+    // [NEW] 调试：第三次点击逻辑坐标（确认框 YES 等）
+    void setGameClick3(int x, int y, int frame) {
+        m_gameClick3X = x;
+        m_gameClick3Y = y;
+        m_gameClick3Frame = frame;
+    }
+
+    // [NEW] 调试：第四次点击逻辑坐标（面板内多级交互验证，如页签→子页签）
+    void setGameClick4(int x, int y, int frame) {
+        m_gameClick4X = x;
+        m_gameClick4Y = y;
+        m_gameClick4Frame = frame;
+    }
+
+    // [NEW] 调试：第五次点击逻辑坐标
+    void setGameClick5(int x, int y, int frame) {
+        m_gameClick5X = x;
+        m_gameClick5Y = y;
+        m_gameClick5Frame = frame;
+    }
+
+    // [NEW] 调试：在指定帧合成按键（spec 支持 "ctrl+5" / "ctrl+shift+i"，验证任意帧热键）
+    void addGameKey(const std::string& spec, int frame) {
+        m_gameKeys.emplace_back(spec, frame);
+    }
+
+    // [NEW] 调试：在指定帧合成 ESC（游戏内系统菜单验证）
+    void setGameEsc(int frame) { m_gameEscFrame = frame; }
+
+    // [NEW] 调试截图：第 frame 帧后保存 BMP 并退出（用于与原版画面比对）；
+    //       cursorX/Y >= 0 时先移动鼠标到逻辑坐标（验证悬停等交互状态）；
+    //       autoClick 时在第 10 帧合成左键点击；click2-6 在第 20/30/35/38/41 帧再点
+    void setScreenshot(const std::string& path, int frame, int cursorX = -1, int cursorY = -1,
+                       bool autoClick = false, int click2X = -1, int click2Y = -1,
+                       int click3X = -1, int click3Y = -1, int click4X = -1, int click4Y = -1,
+                       int click5X = -1, int click5Y = -1, int click6X = -1, int click6Y = -1,
+                       int click7X = -1, int click7Y = -1) {
+        m_shotPath = path;
+        m_shotFrame = frame;
+        m_shotCursorX = cursorX;
+        m_shotCursorY = cursorY;
+        m_shotClick = autoClick;
+        m_shotClick2X = click2X;
+        m_shotClick2Y = click2Y;
+        m_shotClick3X = click3X;
+        m_shotClick3Y = click3Y;
+        m_shotClick4X = click4X;
+        m_shotClick4Y = click4Y;
+        m_shotClick5X = click5X;
+        m_shotClick5Y = click5Y;
+        m_shotClick6X = click6X;
+        m_shotClick6Y = click6Y;
+        m_shotClick7X = click7X;
+        m_shotClick7Y = click7Y;
+    }
+
+private:
+    // [NEW M4-A2] free/wide：按窗口 drawable 重建画布（resize 事件驱动）
+    void applyWindowResize();
+    // 对应原版 DefWindowProcA 分支（无模态处理器时的默认处理）
+    void defaultEvent(const SDL_Event& event);
+    // [PORT Win32:GetCursorPos] 窗口坐标 → 640x480 逻辑坐标
+    void transformMouseEvent(SDL_Event& event);
+    // [RE 0x401010] 全局键盘钩子行为：方向键 SetCursorPos、確定模拟左键、取消模拟右键
+    void handleKeyboardHook(const SDL_Event& event);
+    // [RE 0x401010] 在当前鼠标位置合成鼠标事件（PostMessageA 迁移）
+    void pushMouseButton(uint32_t type, uint8_t button);
+
+    std::string m_gameDir;
+    std::string m_mediaDir;
+    bool m_headless = false;
+    bool m_autoScale = false;     // [NEW M4-A2] free/wide：画布跟随 drawable + resize
+    bool m_resizePending = false; // [NEW M4-A2] 待重建画布
+    // [PORT 安卓] 触屏长按 = Esc（通用取消/关闭；触屏无右键，右键/Esc 双语义的对话框靠它退出）
+    rich4::platform::TouchGestureTracker m_touch;
+    bool m_stats = false;         // [NEW M4-A2] --stats 性能统计
+    int m_statsFrames = 0;
+    uint64_t m_statsWindowUs = 0;
+    Window m_window;
+    Renderer m_renderer;
+    Input m_input;
+    Audio m_audio;
+    EventStack m_events;
+    GameState m_state;
+    Surface m_surface;
+    Cursor m_cursor;
+    TextRenderer m_text;
+    bool m_uiClicked = false;
+    bool m_skipInput = false; // [RE 0x4528B9/0x4544F6/0x45144F] 演出打断标志
+    bool m_modalBaseFilled = false; // [NEW M4-D] 640 基准模态两侧已清除（进入时一次）
+    bool m_forceRepaint = false;    // [NEW M4-D] resize 后强制重绘当前模态（tickMs=0 层不自绘）
+    bool m_enterSwitchMusic = false; // [RE 0x401CFC/0x401D14] enterGameLoop a1
+    std::string m_shotPath;
+    int m_shotFrame = 0;
+    int m_shotCursorX = -1;
+    int m_shotCursorY = -1;
+    bool m_shotClick = false;
+    int m_shotClick2X = -1;
+    int m_shotClick2Y = -1;
+    int m_shotClick3X = -1;
+    int m_shotClick3Y = -1;
+    int m_shotClick4X = -1;
+    int m_shotClick4Y = -1;
+    int m_shotClick5X = -1;
+    int m_shotClick5Y = -1;
+    int m_shotClick6X = -1;
+    int m_shotClick6Y = -1;
+    int m_shotClick7X = -1;
+    int m_shotClick7Y = -1;
+    float m_shotWinX = 0.0f;
+    float m_shotWinY = 0.0f;
+    int m_gameClickX = -1;
+    int m_gameClickY = -1;
+    int m_gameClickFrame = 0;
+    int m_gameClick2X = -1;
+    int m_gameClick2Y = -1;
+    int m_gameClick2Frame = 0;
+    int m_gameClick3X = -1;
+    int m_gameClick3Y = -1;
+    int m_gameClick3Frame = 0;
+    int m_gameClick4X = -1;
+    int m_gameClick4Y = -1;
+    int m_gameClick4Frame = 0;
+    int m_gameClick5X = -1;
+    int m_gameClick5Y = -1;
+    int m_gameClick5Frame = 0;
+    std::vector<std::pair<std::string, int>> m_gameKeys; // [NEW] --game-key 任意帧按键
+    int m_gameEscFrame = -1;
+    int m_gameDragX1 = -1;
+    int m_gameDragY1 = -1;
+    int m_gameDragX2 = -1;
+    int m_gameDragY2 = -1;
+    int m_gameDragFrame = 0;
+    int m_gameRClickX = -1;
+    int m_gameRClickY = -1;
+    int m_gameRClickFrame = 0;
+    bool m_shotEsc = false;
+    int m_shotEscFrame = 25;
+    int m_shotHoverX = -1;
+    int m_shotHoverY = -1;
+    std::string m_shotKey;
+    // [RE 0x401010] word_46CB09：確定键模拟左键按下的去重标志
+    bool m_hookLeftDown = false;
+    bool m_mouseOv = false;
+    int m_mouseOvX = 0;
+    int m_mouseOvY = 0;
+    int m_frameCount = 0;
+    bool m_running = false;
+    // [RE 0x401B9C] WinMain 主循环 LABEL_5/LABEL_6 驱动：0=走 LABEL_5（回主菜单，清通关进度）；
+    //   1=LABEL_6 通关续新游戏（不清进度，newGameInit(1) 保留配置+灰名单）；2=LABEL_6 失败读档继续
+    int m_runFlow = 0;
+};
+
+} // namespace rich4

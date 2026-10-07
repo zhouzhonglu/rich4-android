@@ -1,0 +1,14 @@
+# id: 114_magic_smoke
+# covers: [HELP 38] 魔法屋——施法→12 惩罚径向选择(0x432E97 DOWN 確認)→選定懲罰→施法生效
+#          同步點：wait log "magic state7 pick-ready"（人類選擇階段就緒）→
+#          clickr magic.pen.2→wait log "magic picked"（hover=pick 掩碼命中）
+# timeout: 60000
+wait idle 1000
+magic
+wait log "magic state7 pick-ready" 25000
+clickr magic.pen.2
+wait log "magic picked" 10000
+assert trace "clicked name=magic.pen.2"
+wait frames 600
+assert state errors == 0
+quit

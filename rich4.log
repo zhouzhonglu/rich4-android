@@ -1,0 +1,118 @@
+==== rich4 log session @ 2026-10-07 02:09:36.042 ====
+[rich4][2026-10-07 02:09:36.042][WARN ] writableDataDir: 'resources/MultiverseJourney' not writable, using fallback '/root/.local/share/rich4/rich4'
+[rich4][2026-10-07 02:09:36.043][INFO ] config: default rich4.ini written (/root/.local/share/rich4/rich4/rich4.ini)
+[rich4][2026-10-07 02:09:36.043][INFO ] display preset: free (drawable auto-scale)
+[rich4][2026-10-07 02:09:36.043][WARN ] --canvas/--scale ignored with --preset wide|free
+[rich4][2026-10-07 02:09:36.107][ERROR] SDL_Init failed: No available audio device
+[rich4][2026-10-07 02:09:36.107][ERROR] Application init failed
+==== rich4 log session @ 2026-10-07 02:10:14.041 ====
+[rich4][2026-10-07 02:10:14.041][WARN ] writableDataDir: 'resources/MultiverseJourney' not writable, using fallback '/root/.local/share/rich4/rich4'
+[rich4][2026-10-07 02:10:14.042][INFO ] config: loaded /root/.local/share/rich4/rich4/rich4.ini (applied=12 unknown=0)
+[rich4][2026-10-07 02:10:14.042][INFO ] display preset: free (drawable auto-scale)
+[rich4][2026-10-07 02:10:14.076][INFO ] autoScale: logical canvas 640x480 (device 1280x960)
+[rich4][2026-10-07 02:10:14.125][INFO ] TextRenderer: FreeType ready (resources/Fonts/HarmonyOS_Sans_SC_Regular.ttf)
+[rich4][2026-10-07 02:10:14.125][ERROR] MKF open failed: resources/MultiverseJourney/Data.mkf
+[rich4][2026-10-07 02:10:14.125][ERROR] gameInit: Data.mkf load failed
+[rich4][2026-10-07 02:10:14.125][ERROR] Application init failed
+==== rich4 log session @ 2026-10-07 02:12:52.927 ====
+[rich4][2026-10-07 02:12:52.926][INFO ] config: default rich4.ini written (/root/rich4-ref/Rich4/rich4.ini)
+[rich4][2026-10-07 02:12:52.927][INFO ] display preset: free (drawable auto-scale)
+[rich4][2026-10-07 02:12:52.964][INFO ] autoScale: logical canvas 640x480 (device 1280x960)
+[rich4][2026-10-07 02:12:53.009][INFO ] TextRenderer: FreeType ready (resources/Fonts/HarmonyOS_Sans_SC_Regular.ttf)
+[rich4][2026-10-07 02:12:53.404][WARN ] MusicDecoder: open failed (error 6): /root/rich4-ref/Rich4/../Media/Music/track10.ogg
+[rich4][2026-10-07 02:12:53.409][INFO ] main menu: 5 buttons (RE 0x4029FD)
+[rich4][2026-10-07 02:12:58.394][INFO ] audio: queued=768 voices=0 track=0 playing=0
+==== rich4 log session @ 2026-10-07 02:14:20.779 ====
+[rich4][2026-10-07 02:14:20.778][INFO ] config: loaded /root/rich4-ref/Rich4/rich4.ini (applied=12 unknown=0)
+[rich4][2026-10-07 02:14:20.779][INFO ] display preset: free (drawable auto-scale)
+[rich4][2026-10-07 02:14:20.830][INFO ] autoScale: logical canvas 640x480 (device 1280x960)
+[rich4][2026-10-07 02:14:20.877][INFO ] TextRenderer: FreeType ready (resources/Fonts/HarmonyOS_Sans_SC_Regular.ttf)
+[rich4][2026-10-07 02:14:21.265][WARN ] MusicDecoder: open failed (error 6): /root/rich4-ref/Rich4/../Media/Music/track10.ogg
+[rich4][2026-10-07 02:14:21.287][INFO ] main menu: 5 buttons (RE 0x4029FD)
+[rich4][2026-10-07 02:14:26.280][INFO ] audio: queued=768 voices=0 track=0 playing=0
+==== rich4 log session @ 2026-10-07 02:36:24.639 ====
+[rich4][2026-10-07 02:36:24.638][INFO ] config: loaded /root/rich4-ref/Rich4/rich4.ini (applied=12 unknown=0)
+[rich4][2026-10-07 02:36:24.639][INFO ] display preset: free (drawable auto-scale)
+[rich4][2026-10-07 02:36:24.704][INFO ] autoScale: logical canvas 640x480 (device 1280x960)
+[rich4][2026-10-07 02:36:24.749][INFO ] TextRenderer: FreeType ready (resources/Fonts/HarmonyOS_Sans_SC_Regular.ttf)
+[rich4][2026-10-07 02:36:25.392][INFO ] quickstart: bypass main menu (RE 0x4029FD)
+[rich4][2026-10-07 02:36:25.393][WARN ] MusicDecoder: open failed (error 6): /root/rich4-ref/Rich4/../Media/Music/track11.ogg
+[rich4][2026-10-07 02:36:25.393][INFO ] quickstart: prefill map=0 players=4 humans=1, dialog skipped (RE 0x404E44 bypass)
+[rich4][2026-10-07 02:36:25.395][INFO ] new game target: gameTimeIndex=0 winCondIndex=0 -> daysLimit=0 winMoney=0 (RE 0x407389/0x4073A3)
+[rich4][2026-10-07 02:36:25.395][INFO ] new game: map=0 mode=0 players=4 humans=1 travel=0 money=200000
+[rich4][2026-10-07 02:36:25.719][INFO ] map loaded: GND 5319312 B, cellEnts=104 estates=51 corps=5 specPts=4 evtCells=22 fresh=1 (Map.mkf[0/1])
+[rich4][2026-10-07 02:36:25.852][INFO ] stock map: s0->3 s1->1 s2->2 s3->0 (specPts=4, RE 0x428CAF)
+[rich4][2026-10-07 02:36:25.896][INFO ] panel UI loaded (RE 0x4190CF)
+[rich4][2026-10-07 02:36:25.899][INFO ] stockInit: opening tick market=0 turn=0 (RE 0x401CEB)
+[rich4][2026-10-07 02:36:25.899][WARN ] MusicDecoder: open failed (error 6): /root/rich4-ref/Rich4/../Media/Music/track02.ogg
+[rich4][2026-10-07 02:36:25.899][WARN ] TODO: intro AVI playback skipped (RE 0x451677)
+[rich4][2026-10-07 02:36:25.899][INFO ] enter game loop (RE 0x401981)
+[rich4][2026-10-07 02:36:25.899][INFO ] spawn: player 0 cellEnt 52 at (1247,742) prevEnt 20 dir 4 (RE 0x40829D)
+[rich4][2026-10-07 02:36:26.032][INFO ] FliDecoder: 440x440 frames=34 speed=42ms (RE 0x450CED)
+[rich4][2026-10-07 02:36:27.836][INFO ] begin player 0 turn: type=1 (RE 0x418C55)
+[rich4][2026-10-07 02:36:31.573][INFO ] audio: queued=768 voices=0 track=0 playing=0
+==== rich4 log session @ 2026-10-07 02:38:45.984 ====
+[rich4][2026-10-07 02:38:45.983][INFO ] config: loaded /root/rich4-ref/Rich4/rich4.ini (applied=12 unknown=0)
+[rich4][2026-10-07 02:38:45.984][INFO ] display preset: free (drawable auto-scale)
+[rich4][2026-10-07 02:38:46.070][INFO ] autoScale: logical canvas 640x480 (device 1280x960)
+[rich4][2026-10-07 02:38:46.112][INFO ] TextRenderer: FreeType ready (resources/Fonts/HarmonyOS_Sans_SC_Regular.ttf)
+[rich4][2026-10-07 02:38:46.513][INFO ] quickstart: bypass main menu (RE 0x4029FD)
+[rich4][2026-10-07 02:38:46.514][WARN ] MusicDecoder: open failed (error 6): /root/rich4-ref/Rich4/../Media/Music/track11.ogg
+[rich4][2026-10-07 02:38:46.514][INFO ] quickstart: prefill map=0 players=4 humans=1, dialog skipped (RE 0x404E44 bypass)
+[rich4][2026-10-07 02:38:46.514][INFO ] new game target: gameTimeIndex=0 winCondIndex=0 -> daysLimit=0 winMoney=0 (RE 0x407389/0x4073A3)
+[rich4][2026-10-07 02:38:46.514][INFO ] new game: map=0 mode=0 players=4 humans=1 travel=0 money=200000
+[rich4][2026-10-07 02:38:46.899][INFO ] map loaded: GND 5319312 B, cellEnts=104 estates=51 corps=5 specPts=4 evtCells=22 fresh=1 (Map.mkf[0/1])
+[rich4][2026-10-07 02:38:46.999][INFO ] stock map: s0->3 s1->1 s2->2 s3->0 (specPts=4, RE 0x428CAF)
+[rich4][2026-10-07 02:38:47.064][INFO ] panel UI loaded (RE 0x4190CF)
+[rich4][2026-10-07 02:38:47.066][INFO ] stockInit: opening tick market=0 turn=0 (RE 0x401CEB)
+[rich4][2026-10-07 02:38:47.066][WARN ] MusicDecoder: open failed (error 6): /root/rich4-ref/Rich4/../Media/Music/track02.ogg
+[rich4][2026-10-07 02:38:47.066][WARN ] TODO: intro AVI playback skipped (RE 0x451677)
+[rich4][2026-10-07 02:38:47.066][INFO ] enter game loop (RE 0x401981)
+[rich4][2026-10-07 02:38:47.066][INFO ] spawn: player 0 cellEnt 51 at (1247,697) prevEnt 52 dir 4 (RE 0x40829D)
+[rich4][2026-10-07 02:38:47.136][INFO ] FliDecoder: 440x440 frames=34 speed=42ms (RE 0x450CED)
+[rich4][2026-10-07 02:38:48.916][INFO ] begin player 0 turn: type=1 (RE 0x418C55)
+[rich4][2026-10-07 02:38:53.419][INFO ] audio: queued=512 voices=0 track=0 playing=0
+==== rich4 log session @ 2026-10-07 02:57:33.353 ====
+[rich4][2026-10-07 02:57:33.352][INFO ] config: loaded /root/rich4-ref/Rich4/rich4.ini (applied=12 unknown=0)
+[rich4][2026-10-07 02:57:33.353][INFO ] display preset: free (drawable auto-scale)
+[rich4][2026-10-07 02:57:33.497][INFO ] autoScale: logical canvas 640x480 (device 1280x960)
+[rich4][2026-10-07 02:57:33.543][INFO ] TextRenderer: FreeType ready (resources/Fonts/HarmonyOS_Sans_SC_Regular.ttf)
+[rich4][2026-10-07 02:57:34.072][INFO ] quickstart: bypass main menu (RE 0x4029FD)
+[rich4][2026-10-07 02:57:34.079][WARN ] MusicDecoder: open failed (error 6): /root/rich4-ref/Rich4/../Media/Music/track11.ogg
+[rich4][2026-10-07 02:57:34.079][INFO ] quickstart: prefill map=0 players=4 humans=1, dialog skipped (RE 0x404E44 bypass)
+[rich4][2026-10-07 02:57:34.079][INFO ] new game target: gameTimeIndex=0 winCondIndex=0 -> daysLimit=0 winMoney=0 (RE 0x407389/0x4073A3)
+[rich4][2026-10-07 02:57:34.079][INFO ] new game: map=0 mode=0 players=4 humans=1 travel=0 money=200000
+[rich4][2026-10-07 02:57:34.572][INFO ] map loaded: GND 5319312 B, cellEnts=104 estates=51 corps=5 specPts=4 evtCells=22 fresh=1 (Map.mkf[0/1])
+[rich4][2026-10-07 02:57:34.757][INFO ] stock map: s0->3 s1->1 s2->2 s3->0 (specPts=4, RE 0x428CAF)
+[rich4][2026-10-07 02:57:34.821][INFO ] panel UI loaded (RE 0x4190CF)
+[rich4][2026-10-07 02:57:34.821][INFO ] stockInit: opening tick market=0 turn=0 (RE 0x401CEB)
+[rich4][2026-10-07 02:57:34.821][WARN ] MusicDecoder: open failed (error 6): /root/rich4-ref/Rich4/../Media/Music/track02.ogg
+[rich4][2026-10-07 02:57:34.821][WARN ] TODO: intro AVI playback skipped (RE 0x451677)
+[rich4][2026-10-07 02:57:34.821][INFO ] enter game loop (RE 0x401981)
+[rich4][2026-10-07 02:57:34.821][INFO ] spawn: player 0 cellEnt 80 at (1248,1464) prevEnt 79 dir 0 (RE 0x40829D)
+[rich4][2026-10-07 02:57:34.910][INFO ] FliDecoder: 440x440 frames=34 speed=42ms (RE 0x450CED)
+[rich4][2026-10-07 02:57:36.738][INFO ] begin player 0 turn: type=1 (RE 0x418C55)
+[rich4][2026-10-07 02:57:42.914][INFO ] audio: queued=512 voices=0 track=0 playing=0
+==== rich4 log session @ 2026-10-07 03:07:34.065 ====
+[rich4][2026-10-07 03:07:34.065][INFO ] config: loaded /root/rich4-ref/Rich4/rich4.ini (applied=12 unknown=0)
+[rich4][2026-10-07 03:07:34.065][INFO ] display preset: free (drawable auto-scale)
+[rich4][2026-10-07 03:07:34.267][INFO ] autoScale: logical canvas 640x480 (device 1280x960)
+[rich4][2026-10-07 03:07:34.315][INFO ] TextRenderer: FreeType ready (resources/Fonts/HarmonyOS_Sans_SC_Regular.ttf)
+[rich4][2026-10-07 03:07:35.373][INFO ] quickstart: bypass main menu (RE 0x4029FD)
+[rich4][2026-10-07 03:07:35.374][WARN ] MusicDecoder: open failed (error 6): /root/rich4-ref/Rich4/../Media/Music/track11.ogg
+[rich4][2026-10-07 03:07:35.374][INFO ] quickstart: prefill map=0 players=4 humans=1, dialog skipped (RE 0x404E44 bypass)
+[rich4][2026-10-07 03:07:35.374][INFO ] new game target: gameTimeIndex=0 winCondIndex=0 -> daysLimit=0 winMoney=0 (RE 0x407389/0x4073A3)
+[rich4][2026-10-07 03:07:35.374][INFO ] new game: map=0 mode=0 players=4 humans=1 travel=0 money=200000
+[rich4][2026-10-07 03:07:35.897][INFO ] map loaded: GND 5319312 B, cellEnts=104 estates=51 corps=5 specPts=4 evtCells=22 fresh=1 (Map.mkf[0/1])
+[rich4][2026-10-07 03:07:36.134][INFO ] stock map: s0->3 s1->1 s2->2 s3->0 (specPts=4, RE 0x428CAF)
+[rich4][2026-10-07 03:07:36.223][INFO ] panel UI loaded (RE 0x4190CF)
+[rich4][2026-10-07 03:07:36.227][INFO ] stockInit: opening tick market=0 turn=0 (RE 0x401CEB)
+[rich4][2026-10-07 03:07:36.227][WARN ] MusicDecoder: open failed (error 6): /root/rich4-ref/Rich4/../Media/Music/track02.ogg
+[rich4][2026-10-07 03:07:36.227][WARN ] TODO: intro AVI playback skipped (RE 0x451677)
+[rich4][2026-10-07 03:07:36.227][INFO ] enter game loop (RE 0x401981)
+[rich4][2026-10-07 03:07:36.227][INFO ] spawn: player 0 cellEnt 50 at (1203,578) prevEnt 21 dir 5 (RE 0x40829D)
+[rich4][2026-10-07 03:07:36.326][ERROR] script exec line 1: unknown command: item.give
+[rich4][2026-10-07 03:07:36.365][INFO ] FliDecoder: 440x440 frames=34 speed=42ms (RE 0x450CED)
+[rich4][2026-10-07 03:07:36.761][ERROR] script exec line 2: unknown command: item.use
+[rich4][2026-10-07 03:07:36.807][INFO ] script exec: DONE (asserts=0 failures=2 frames=3)
+[rich4][2026-10-07 03:07:36.807][INFO ] TEST SUMMARY asserts=0 failures=2 -> FAIL

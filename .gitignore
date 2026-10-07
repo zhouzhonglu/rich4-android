@@ -1,0 +1,48 @@
+# ===== 版权素材：绝不能提交（正版游戏文件 / 提取物）=====
+# 安卓打包用的素材目录（mkf/字体/音乐全在这里，仅供本地打包）
+android/app/src/main/assets/
+# 第三方依赖（可重新下载，体积巨大）
+third_party/
+
+resources/MultiverseJourney/
+resources/Fonts/
+*.mkf
+*.MKF
+*.exe
+*.EXE
+*.avi
+*.AVI
+*.ico
+
+# 从正版提取的音频/音乐
+assets/Music/
+*.ogg
+*.wav
+
+# 逆向数据库（IDB）
+*.i64
+*.id0
+*.id1
+*.id2
+*.nam
+*.til
+
+# ===== 构建产物 =====
+build/
+**/build/
+dist/
+*.o
+*.a
+*.so
+.gradle/
+android/.gradle/
+android/local.properties
+android/app/build/
+node_modules/
+
+# ===== 敏感 =====
+.env
+*.env
+
+# 编译产物（可重建）
+android/app/src/main/jniLibs/
